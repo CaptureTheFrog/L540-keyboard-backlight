@@ -1,0 +1,3 @@
+[submodule "controller_firmware/v-usb"]
+	path = controller_firmware/v-usb
+	url = https://github.com/obdev/v-usb
