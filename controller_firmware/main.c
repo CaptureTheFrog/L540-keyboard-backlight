@@ -20,6 +20,11 @@ unsigned char current_status_buffer_index = 0;
 
 unsigned char usbMsg[8];
 
+#define INIT_RECVDATA(rq)   req_to_recvdata = rq->bRequest; bytes_remaining = rq->wLength.word; offset = 0
+uint16_t req_to_recvdata = KBD_BL_REQUEST_INVALID;
+uint16_t bytes_remaining = 0;
+uint16_t offset = 0;
+
 void setupPWM() {
     // Set up timer/PWM items
     PLLCSR |= (1 << PLLE); //Enable PLL
@@ -45,33 +50,67 @@ usbMsgLen_t usbFunctionSetup(uchar setupData[8])
     usbRequest_t *rq = (usbRequest_t *)setupData;   // cast to structured data for parsing
     switch(rq->bRequest){
         case KBD_BL_REQUEST_SET_TARGET_BRIGHTNESS:
-            OCR1A = rq->wValue.bytes[0];
+            CURRENT_STATUS.target_brightness = rq->wValue.bytes[0];
             return 0;                           // no data block sent or received
         case KBD_BL_REQUEST_GET_ACTUAL_BRIGHTNESS:
-        case KBD_BL_REQUEST_GET_TARGET_BRIGHTNESS:
             usbMsgPtr = usbMsg;
             usbMsg[0] = OCR1A;
+            return 1;
+        case KBD_BL_REQUEST_GET_TARGET_BRIGHTNESS:
+            usbMsgPtr = usbMsg;
+            usbMsg[0] = CURRENT_STATUS.target_brightness;
             return 1;
         case KBD_BL_REQUEST_GET_STATE_DATA:
             usbMsgPtr = (unsigned char*) &CURRENT_STATUS;
             return sizeof(CURRENT_STATUS);
         case KBD_BL_REQUEST_SET_STATE_DATA:
-            if(rq->wLength.word == sizeof(INACTIVE_STATUS)) {
+            // wIndex = offset into state data to start writing from
+            if(rq->wLength.word <= sizeof(INACTIVE_STATUS) - rq->wIndex.word) {
+                INIT_RECVDATA(rq);
+                offset = rq->wIndex.word;
                 // init internal status
                 memset(&INACTIVE_INTERNAL_STATUS, 0, sizeof(INACTIVE_INTERNAL_STATUS));
-                // copy new external status
-                /*if(usbMsgPtr[0] == 0x0){
-                    OCR1A = 0;
-                }*/
-                memcpy(&INACTIVE_STATUS, usbMsgPtr, sizeof(INACTIVE_STATUS));
-                // switch buffers
-                current_status_buffer_index = 1 - current_status_buffer_index;
+                memcpy(&INACTIVE_STATUS, &CURRENT_STATUS, sizeof(INACTIVE_STATUS));
             }else{
-                // invalid state data length, cannot process
+                // invalid state data length, make sure recv stalls
+                req_to_recvdata = KBD_BL_REQUEST_INVALID;
             }
-            return 0;
+            return USB_NO_MSG;
     }
     return 0;                               // ignore all unknown requests
+}
+
+/*
+ * usbFunctionWrite: called when the host is writing data to us, i.e. we are reading
+ *                      (this is confusingly named in v-usb)
+ */
+uchar usbFunctionWrite(uchar *data, uchar len){
+    if(req_to_recvdata == KBD_BL_REQUEST_INVALID) // we don't want to receive right now
+        return -1;
+    if(bytes_remaining == 0)
+        return 1;               /* end of transfer */
+    if(len > bytes_remaining)
+        len = bytes_remaining;
+
+    switch(req_to_recvdata){
+        case KBD_BL_REQUEST_SET_STATE_DATA:
+            memcpy((&INACTIVE_STATUS) + offset, data, len);
+            if(bytes_remaining == len){
+                // switch buffers - this is last chunk
+                current_status_buffer_index = 1 - current_status_buffer_index;
+            }
+            break;
+        default:
+            req_to_recvdata = KBD_BL_REQUEST_INVALID;
+            return -1;
+    }
+
+    offset += len;
+    bytes_remaining -= len;
+    if(bytes_remaining == 0){
+        req_to_recvdata = KBD_BL_REQUEST_INVALID;
+    }
+    return bytes_remaining == 0; /* return 1 if this was the last chunk */
 }
 
 int main(void) {
