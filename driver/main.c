@@ -54,16 +54,49 @@ static ssize_t flags_show(struct device *dev, struct device_attribute *attr, cha
         return -EINVAL;
     }
 
-    // Read the received flag from rcv_buf
-    buf[0] = status->flags;  // Place the received flag in the output buffer
-    buf[1] = '\0';        // Newline for proper formatting
+    memcpy(buf, &status->flags, sizeof(status->flags));
     kfree(status);
 
-    return 2; // Returning the length of the output (1 byte flag + 1 newline)
+    return sizeof(status->flags);
 }
 
 static ssize_t flags_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
-    return count;
+    int retval;
+    struct led_classdev* led_cdev = dev_get_drvdata(dev);
+    struct kbdbl_led* priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
+    struct usb_device* udev = priv_data->udev;
+
+    if(count != sizeof(((status_t*)0)->flags)){
+        return -EINVAL;
+    }
+
+    // needs to be DMA-safe so kmalloc it
+    typeof(((status_t*)0)->flags)* flags = kmalloc(sizeof(((status_t*)0)->flags), GFP_KERNEL);
+    if (!flags) {
+        printk(KERN_ERR "%s - failed to allocate memory for falgs\n", __func__);
+        return -ENOMEM;
+    }
+
+    memcpy(flags, buf, sizeof(((status_t*)0)->flags));
+
+    retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+                             KBD_BL_REQUEST_SET_STATE_DATA, USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+                             0, offsetof(status_t, flags),
+                             flags, sizeof(((status_t*)0)->flags), 5000);
+    if (retval < 0) {
+        printk(KERN_ERR "%s - failed to submit control msg, error %d\n", __func__, retval);
+        kfree(flags);
+        return retval;
+    }
+
+    if (retval != sizeof(((status_t*)0)->flags)){
+        printk(KERN_ERR "%s - we wrote %d bytes but expected to write %lu\n", __func__, retval, sizeof(((status_t*)0)->flags));
+        kfree(flags);
+        return -EINVAL;
+    }
+
+    kfree(flags);
+    return retval;
 }
 
 static DEVICE_ATTR(flags, 0664, flags_show, flags_store);
