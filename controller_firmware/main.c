@@ -94,7 +94,7 @@ uchar usbFunctionWrite(uchar *data, uchar len){
 
     switch(req_to_recvdata){
         case KBD_BL_REQUEST_SET_STATE_DATA:
-            memcpy((&INACTIVE_STATUS) + offset, data, len);
+            memcpy(((void*)(&INACTIVE_STATUS)) + offset, data, len);
             if(bytes_remaining == len){
                 // switch buffers - this is last chunk
                 current_status_buffer_index = 1 - current_status_buffer_index;
