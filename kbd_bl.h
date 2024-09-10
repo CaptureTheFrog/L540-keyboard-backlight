@@ -7,6 +7,8 @@
 #include <linux/types.h>
 #else
 #include <stdint.h>
+#define U16_MAX     UINT16_MAX
+#define U8_MAX      UINT8_MAX
 #endif
 
 #define KBD_BL_REQUEST_GET_TARGET_BRIGHTNESS	((uint16_t) 0x0)
