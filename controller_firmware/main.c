@@ -9,6 +9,10 @@
 
 #define LED_PIN PB1
 
+volatile uint32_t usecs_counter = 0;
+volatile uint16_t time_per_cycle_us = 0;  // Approximate time per PWM cycle in ms
+volatile uint8_t should_reset_usecs = 0;
+
 internal_status_t status_buffer[2];
 unsigned char current_status_buffer_index = 0;
 
@@ -26,23 +30,41 @@ uint16_t bytes_remaining = 0;
 uint16_t offset = 0;
 
 void setupPWM() {
-    // Set up timer/PWM items
-    PLLCSR |= (1 << PLLE); //Enable PLL
+    // Set up Timer 1 for PWM on PB1
+    PLLCSR |= (1 << PLLE);  // Enable PLL
+    while (!(PLLCSR & (1 << PLOCK)));  // Wait for PLL to lock
+    PLLCSR |= (1 << PCKE);  // Enable clock source
 
-    //Wait for PLL to lock
-    while ((PLLCSR & (1<<PLOCK)) == 0x00)
-    {
-        // Do nothing until plock bit is set
-    }
+    DDRB |= _BV(LED_PIN);  // Set LED_PIN as output
+    TCCR1 = (1 << CS12) | (1 << PWM1A) | (1 << COM1A1);  // Clock/8, PWM on OC1A (PB1)
 
-    // Enable clock source bit
-    PLLCSR |= (1 << PCKE);
+    OCR1C = 0xFF;  // max frequency
 
-    DDRB |= _BV(LED_PIN);
-    // put your setup code here, to run once:
-    TCCR1 = 0;
-    TCCR1 |= (1<<CS12) | (1<<PWM1A) | (1<<COM1A1); //start timer1, devide timer1 clock by 8, enable pwm, clear on match
-    OCR1C = 0xFF; // maximum frequency
+    // Calculate time per PWM cycle (in us)
+    time_per_cycle_us = (OCR1C + 1) * 8L / (F_CPU / 1000000L);  // Result in us
+
+    // todo: why is the above 1/4 of the correct val?
+    time_per_cycle_us *= 4;
+
+    TIMSK |= (1 << TOIE1);  // Enable Timer 1 overflow interrupt
+}
+
+ISR(TIMER1_OVF_vect) {
+    usecs_counter += time_per_cycle_us;
+}
+
+uint32_t usecs() {
+    uint32_t u;
+    cli();
+    u = usecs_counter;
+    sei();
+    return u;
+}
+
+void reset_usecs() {
+    cli();
+    usecs_counter = 0;
+    sei();
 }
 
 usbMsgLen_t usbFunctionSetup(uchar setupData[8])
@@ -98,6 +120,7 @@ uchar usbFunctionWrite(uchar *data, uchar len){
             if(bytes_remaining == len){
                 // switch buffers - this is last chunk
                 current_status_buffer_index = 1 - current_status_buffer_index;
+                reset_usecs();
             }
             break;
         default:
@@ -111,6 +134,20 @@ uchar usbFunctionWrite(uchar *data, uchar len){
         req_to_recvdata = KBD_BL_REQUEST_INVALID;
     }
     return bytes_remaining == 0; /* return 1 if this was the last chunk */
+}
+
+#define IS_FLAG_CURRENTLY_SET(flag) (KBD_BL_IS_FLAG_SET(CURRENT_STATUS, flag))
+void updateLED(){
+    if(IS_FLAG_CURRENTLY_SET(KBD_BL_FLAGS_HARDWARE_BLINK)){
+        if((CURRENT_INTERNAL_STATUS.blink_state && usecs() >= CURRENT_STATUS.delay_on) ||
+            (!CURRENT_INTERNAL_STATUS.blink_state && usecs() >= CURRENT_STATUS.delay_off)){
+            CURRENT_INTERNAL_STATUS.blink_state = !CURRENT_INTERNAL_STATUS.blink_state;
+            reset_usecs();
+        }
+        OCR1A = CURRENT_INTERNAL_STATUS.blink_state ? CURRENT_STATUS.target_brightness : CURRENT_STATUS.low_blink_target_brightness;
+        return;
+    }
+    OCR1A = CURRENT_STATUS.target_brightness;
 }
 
 int main(void) {
@@ -140,6 +177,7 @@ int main(void) {
     for (;;) {
         wdt_reset(); // Reset watchdog timer
         usbPoll();   // Poll USB events
+        updateLED(); // Update LED value
     }
 
     return 0;
