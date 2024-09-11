@@ -1,8 +1,15 @@
+#define CONFIG_POWERSAVE
+
 #include <avr/io.h>
 #include <util/delay.h>
 #include <avr/wdt.h>
 #include <avr/interrupt.h>
 #include <string.h>
+
+#ifdef CONFIG_POWERSAVE
+#include <avr/power.h>
+#include <avr/sleep.h>
+#endif
 
 #include "v-usb/usbdrv/usbdrv.h"
 #include "../kbd_bl.h"
@@ -11,7 +18,6 @@
 
 volatile uint32_t usecs_counter = 0;
 volatile uint16_t time_per_cycle_us = 0;  // Approximate time per PWM cycle in ms
-volatile uint8_t should_reset_usecs = 0;
 
 internal_status_t status_buffer[2];
 unsigned char current_status_buffer_index = 0;
@@ -154,8 +160,32 @@ int main(void) {
     // init status buffer
     memset(status_buffer, 0, sizeof(status_buffer));
 
-    DDRB &= ~(_BV(USB_CFG_DPLUS_BIT) | _BV(USB_CFG_DMINUS_BIT)); // Make sure USB data pins are set as inputs
+
+
+
+#ifdef CONFIG_POWERSAVE// Disable ADC
+    ADCSRA &= ~(1 << ADEN); // disable the ADC
+
+    DDRB = 0x00;  // set all IO as inputs
+    PORTB = ~(_BV(USB_CFG_DPLUS_BIT) | _BV(USB_CFG_DMINUS_BIT)); // enable pullup on all IO except USB
+    DIDR0 = ~(_BV(USB_CFG_DPLUS_BIT) | _BV(USB_CFG_DMINUS_BIT)); // turn off all digital inputs except USB
+
+    GIMSK |= (1 << PCIE);      // Enable PCINT interrupt
+    PCMSK |= _BV(USB_CFG_DPLUS_BIT) | _BV(USB_CFG_DMINUS_BIT);    // Enable PCINT for usb data lines
+
+    // Set the sleep mode to Power-down
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+    sleep_enable();
+
+    // Disable unnecessary features
+    power_adc_disable();
+    power_usi_disable();
+#else
+    DDRB &= ~(_BV(USB_CFG_DPLUS_BIT) | _BV(USB_CFG_DMINUS_BIT)); // USB data pins are set as inputs
     PORTB &= ~(_BV(USB_CFG_DPLUS_BIT) | _BV(USB_CFG_DMINUS_BIT)); // Make sure USB data pins have pull-ups turned off
+#endif
+
+
 
     cli();
 
@@ -174,10 +204,33 @@ int main(void) {
     wdt_enable(WDTO_1S);
     sei(); // Enable global interrupts
 
+    reset_usecs();
+
+    uint32_t loops_without_sof = 0;
+
     for (;;) {
         wdt_reset(); // Reset watchdog timer
         usbPoll();   // Poll USB events
         updateLED(); // Update LED value
+
+        if(usbSofCount != 0) {
+            usbSofCount = 0;
+            loops_without_sof = 0;
+        }else{
+            if (loops_without_sof++ >= 100000) {
+
+                // disconnect the LED from the PWM because PWM will freeze state during sleep
+                TCCR1 &= ~(1 << COM1A1);
+                PORTB &= ~(1 << LED_PIN);
+
+                wdt_disable();
+                sleep_cpu();
+                wdt_enable(WDTO_1S);
+
+                loops_without_sof = 0; // reset sof counter - a wakeup counts as activity
+                TCCR1 |= (1 << COM1A1);  // re-enable pwm
+            }
+        }
     }
 
     return 0;
