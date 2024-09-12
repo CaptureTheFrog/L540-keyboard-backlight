@@ -21,11 +21,9 @@ MODULE_DEVICE_TABLE(usb, your_device_table);
 struct kbdbl_led {
     struct usb_device* udev;
     struct led_classdev led_cdev;
-    acpi_bus_id active_lid;
+    struct acpi_device* active_lid;
     // other members...
 };
-
-#define ACPI_BUS_ID_MAX_LEN    (sizeof(acpi_bus_id) / sizeof(((acpi_bus_id*)0)[0]))
 
 static void urb_cleanup_generic(struct urb *urb)
 {
@@ -263,9 +261,15 @@ static ssize_t delay_off_store(struct device *dev, struct device_attribute *attr
 
 static DEVICE_ATTR(delay_off, 0664, delay_off_show, delay_off_store);
 
-struct lid_callback_data {
-    char *buf;
+struct lid_show_callback_data {
+    char* buf;
     ssize_t len;
+    struct kbdbl_led* priv_data;
+};
+
+struct lid_store_callback_data {
+    const char* buf;
+    bool device_found;
     struct kbdbl_led* priv_data;
 };
 
@@ -273,18 +277,17 @@ static ssize_t lid_show(struct device *dev, struct device_attribute *attr, char 
     struct led_classdev* led_cdev = dev_get_drvdata(dev);
     struct kbdbl_led* priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
 
-    struct lid_callback_data data;
+    struct lid_show_callback_data data;
     data.priv_data = priv_data;
     data.buf = buf;
     data.len = 0;
-    data.len += scnprintf(data.buf + data.len, PAGE_SIZE - data.len, priv_data->active_lid[0] == '\x00' ? "[none]" : "none");
+    data.len += scnprintf(data.buf + data.len, PAGE_SIZE - data.len, priv_data->active_lid == NULL ? "[none]" : "none");
 
     acpi_status lid_callback(acpi_handle handle, u32 lvl, void *context, void **rv) {
         struct acpi_device* device = acpi_fetch_acpi_dev(handle);
-        struct lid_callback_data* data = (struct lid_callback_data*)context;
+        struct lid_show_callback_data* data = (struct lid_show_callback_data*)context;
         data->len += scnprintf(data->buf + data->len, PAGE_SIZE - data->len,
-                               strncmp(acpi_device_bid(device), data->priv_data->active_lid, ACPI_BUS_ID_MAX_LEN) == 0 ?
-                                    " [%s]" : " %s",
+                               device == data->priv_data->active_lid ? " [%s]" : " %s",
                                acpi_device_bid(device));
         return AE_OK;
     }
@@ -301,21 +304,21 @@ static ssize_t lid_store(struct device *dev, struct device_attribute *attr, cons
     struct kbdbl_led* priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
 
     if(sysfs_streq(buf, "none")) {
-        memset(priv_data->active_lid, 0, ACPI_BUS_ID_MAX_LEN);
+        priv_data->active_lid = NULL;
         return count;
     }
 
-    struct lid_callback_data data;
+    struct lid_store_callback_data data;
     data.priv_data = priv_data;
     data.buf = buf;
-    data.len = 0;
+    data.device_found = false;
 
     acpi_status lid_callback(acpi_handle handle, u32 lvl, void *context, void **rv) {
         struct acpi_device* device = acpi_fetch_acpi_dev(handle);
-        struct lid_callback_data* data = (struct lid_callback_data*)context;
+        struct lid_store_callback_data* data = (struct lid_store_callback_data*)context;
         if(sysfs_streq(data->buf, acpi_device_bid(device))){
-            strncpy(data->priv_data->active_lid, acpi_device_bid(device), ACPI_BUS_ID_MAX_LEN);
-            data->len = 1;
+            data->priv_data->active_lid = device;
+            data->device_found = true;
             return AE_CTRL_TERMINATE;
         }
         return AE_OK;
@@ -324,7 +327,7 @@ static ssize_t lid_store(struct device *dev, struct device_attribute *attr, cons
     // Walk ACPI namespace to find LID devices
     acpi_get_devices("PNP0C0D", lid_callback, &data, NULL);
 
-    if(data.len == 0){
+    if(!data.device_found){
         return -EINVAL;
     }
 
@@ -442,7 +445,7 @@ static int your_module_probe(struct usb_interface *interface,
     memcpy(&priv_data->led_cdev, &led_cdev_template, sizeof(struct led_classdev));
 
     priv_data->led_cdev.brightness = LED_OFF;  // Initial brightness
-    memset(priv_data->active_lid, 0, ACPI_BUS_ID_MAX_LEN);
+    priv_data->active_lid = NULL;
 
     ret = led_classdev_register(&interface->dev, &priv_data->led_cdev);
     if (ret) {
