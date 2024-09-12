@@ -152,54 +152,37 @@ static void your_led_brightness_set(struct led_classdev *led_cdev,
 
 static enum led_brightness your_led_brightness_get(struct led_classdev *led_cdev)
 {
-    struct urb *urb;
-    struct usb_ctrlrequest *setup_data;
-    struct kbdbl_led *priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
-
+    int retval;
+    struct kbdbl_led* priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
     struct usb_device* udev = priv_data->udev;
-    urb = usb_alloc_urb(0, GFP_KERNEL);
-    if(urb == NULL){
-        dev_err(led_cdev->dev, "%s - failed to allocate memory for urb\n", __func__);
-        return -1;
+
+    // needs to be DMA-safe so kmalloc it
+    typeof(((status_t*)0)->target_brightness)* value = kmalloc(sizeof(((status_t*)0)->target_brightness), GFP_KERNEL);
+    if (!value) {
+        printk(KERN_ERR "%s - failed to allocate memory for value\n", __func__);
+        return -ENOMEM;
     }
 
-    // Allocate memory for the setup data using the provided struct usb_ctrlrequest
-    setup_data = kmalloc(sizeof(struct usb_ctrlrequest), GFP_KERNEL);
-    if (setup_data == NULL) {
-        dev_err(led_cdev->dev, "%s - failed to allocate memory for setup data\n", __func__);
-        usb_free_urb(urb);
-        return -1;
+    retval = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
+                             KBD_BL_REQUEST_GET_TARGET_BRIGHTNESS, USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN,
+                             0, 0,
+                             value, sizeof(((status_t*)0)->target_brightness), 50);
+    if (retval < 0) {
+        printk(KERN_ERR "%s - failed to submit control msg, error %d\n", __func__, retval);
+        kfree(value);
+        return retval;
     }
 
-    // Fill in the setup data structure
-    setup_data->bRequestType = USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN;
-    setup_data->bRequest = KBD_BL_REQUEST_GET_TARGET_BRIGHTNESS;  // Your specific control request
-    setup_data->wValue = 0;  // Value parameter
-    setup_data->wIndex = 0;  // Index parameter
-    setup_data->wLength = 1; // Length parameter (adjust as needed)
-
-    unsigned char* rcv_buf =  kmalloc(1, GFP_KERNEL);
-
-    usb_fill_control_urb(urb,
-                         udev,
-                         usb_rcvctrlpipe(udev, 0),
-                         (unsigned char*) setup_data,
-                         rcv_buf,
-                         1,
-                         urb_cleanup_generic,
-                         NULL);
-
-    /* send the data out the control port */
-    int retval = usb_submit_urb(urb, GFP_KERNEL);
-    if (retval) {
-        dev_err(led_cdev->dev,
-                "%s - failed submitting control urb, error %d\n",
-                __func__, retval);
-        usb_free_urb(urb);
-        kfree(setup_data);
+    if (retval != sizeof(((status_t*)0)->target_brightness)){
+        printk(KERN_ERR "%s - device returned %d bytes but we expected %lu\n", __func__, retval, sizeof(((status_t*)0)->target_brightness));
+        kfree(value);
+        return -EINVAL;
     }
 
-    return 0;
+    enum led_brightness brightness = (enum led_brightness)*value;
+    kfree(value);
+
+    return brightness;
 }
 
 struct led_classdev led_cdev_template = {
