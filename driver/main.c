@@ -6,7 +6,10 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 
+#include "kbdbl.h"
 #include "../kbd_bl.h"
+#include "brightness.h"
+#include "lid.h"
 
 #define LED_NAME        "platform::kbd_backlight"
 
@@ -17,20 +20,6 @@ static struct usb_device_id your_device_table[] = {
         { } // Terminating entry
 };
 MODULE_DEVICE_TABLE(usb, your_device_table);
-
-struct kbdbl_led {
-    struct usb_device* udev;
-    struct led_classdev led_cdev;
-    struct acpi_device* active_lid;
-    // other members...
-};
-
-static void urb_cleanup_generic(struct urb *urb)
-{
-    kfree(urb->transfer_buffer);
-    kfree(urb->setup_packet);
-    usb_free_urb(urb);
-}
 
 static ssize_t flags_show(struct device *dev, struct device_attribute *attr, char *buf) {
     int retval;
@@ -261,164 +250,7 @@ static ssize_t delay_off_store(struct device *dev, struct device_attribute *attr
 
 static DEVICE_ATTR(delay_off, 0664, delay_off_show, delay_off_store);
 
-struct lid_show_callback_data {
-    char* buf;
-    ssize_t len;
-    struct kbdbl_led* priv_data;
-};
-
-struct lid_store_callback_data {
-    const char* buf;
-    bool device_found;
-    struct kbdbl_led* priv_data;
-};
-
-static ssize_t lid_show(struct device *dev, struct device_attribute *attr, char *buf) {
-    struct led_classdev* led_cdev = dev_get_drvdata(dev);
-    struct kbdbl_led* priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
-
-    struct lid_show_callback_data data;
-    data.priv_data = priv_data;
-    data.buf = buf;
-    data.len = 0;
-    data.len += scnprintf(data.buf + data.len, PAGE_SIZE - data.len, priv_data->active_lid == NULL ? "[none]" : "none");
-
-    acpi_status lid_callback(acpi_handle handle, u32 lvl, void *context, void **rv) {
-        struct acpi_device* device = acpi_fetch_acpi_dev(handle);
-        struct lid_show_callback_data* data = (struct lid_show_callback_data*)context;
-        data->len += scnprintf(data->buf + data->len, PAGE_SIZE - data->len,
-                               device == data->priv_data->active_lid ? " [%s]" : " %s",
-                               acpi_device_bid(device));
-        return AE_OK;
-    }
-
-    // Walk ACPI namespace to find LID devices
-    acpi_get_devices("PNP0C0D", lid_callback, &data, NULL);
-
-    data.len += scnprintf(data.buf + data.len, PAGE_SIZE - data.len, "\n");
-    return data.len;
-}
-
-static ssize_t lid_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
-    struct led_classdev* led_cdev = dev_get_drvdata(dev);
-    struct kbdbl_led* priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
-
-    if(sysfs_streq(buf, "none")) {
-        priv_data->active_lid = NULL;
-        return count;
-    }
-
-    struct lid_store_callback_data data;
-    data.priv_data = priv_data;
-    data.buf = buf;
-    data.device_found = false;
-
-    acpi_status lid_callback(acpi_handle handle, u32 lvl, void *context, void **rv) {
-        struct acpi_device* device = acpi_fetch_acpi_dev(handle);
-        struct lid_store_callback_data* data = (struct lid_store_callback_data*)context;
-        if(sysfs_streq(data->buf, acpi_device_bid(device))){
-            data->priv_data->active_lid = device;
-            data->device_found = true;
-            return AE_CTRL_TERMINATE;
-        }
-        return AE_OK;
-    }
-
-    // Walk ACPI namespace to find LID devices
-    acpi_get_devices("PNP0C0D", lid_callback, &data, NULL);
-
-    if(!data.device_found){
-        return -EINVAL;
-    }
-
-    return count;
-}
-
 static DEVICE_ATTR(lid, 0664, lid_show, lid_store);
-
-static void your_led_brightness_set(struct led_classdev *led_cdev,
-                                    enum led_brightness brightness)
-{
-    struct urb *urb;
-	struct usb_ctrlrequest *setup_data;
-    struct kbdbl_led *priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
-
-    struct usb_device* udev = priv_data->udev;
-    urb = usb_alloc_urb(0, GFP_KERNEL);
-    if(urb == NULL){
-		dev_err(led_cdev->dev, "%s - failed to allocate memory for urb\n", __func__);
-		return;
-	}
-
-	// Allocate memory for the setup data using the provided struct usb_ctrlrequest
-	setup_data = kmalloc(sizeof(struct usb_ctrlrequest), GFP_KERNEL);
-	if (setup_data == NULL) {
-		dev_err(led_cdev->dev, "%s - failed to allocate memory for setup data\n", __func__);
-		usb_free_urb(urb);
-		return;
-	}
-
-	// Fill in the setup data structure
-	setup_data->bRequestType = USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT;
-	setup_data->bRequest = KBD_BL_REQUEST_SET_TARGET_BRIGHTNESS;  // Your specific control request
-	setup_data->wValue = cpu_to_le16(brightness);  // Value parameter
-	setup_data->wIndex = 0;  // Index parameter
-	setup_data->wLength = 0; // Length parameter (adjust as needed)
-
-    usb_fill_control_urb(urb,
-                         udev,
-                         usb_sndctrlpipe(udev, 0),
-						 (unsigned char*) setup_data,
-                         NULL,
-                         0,
-						 urb_cleanup_generic,
-						 NULL);
-
-    /* send the data out the control port */
-    int retval = usb_submit_urb(urb, GFP_KERNEL);
-    if (retval) {
-        dev_err(led_cdev->dev,
-                "%s - failed submitting control urb, error %d\n",
-                __func__, retval);
-		usb_free_urb(urb);
-		kfree(setup_data);
-    }
-}
-
-static enum led_brightness your_led_brightness_get(struct led_classdev *led_cdev)
-{
-    int retval;
-    struct kbdbl_led* priv_data = container_of(led_cdev, struct kbdbl_led, led_cdev);
-    struct usb_device* udev = priv_data->udev;
-
-    // needs to be DMA-safe so kmalloc it
-    typeof(((status_t*)0)->target_brightness)* value = kmalloc(sizeof(((status_t*)0)->target_brightness), GFP_KERNEL);
-    if (!value) {
-        printk(KERN_ERR "%s - failed to allocate memory for value\n", __func__);
-        return -ENOMEM;
-    }
-
-    retval = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
-                             KBD_BL_REQUEST_GET_TARGET_BRIGHTNESS, USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN,
-                             0, 0,
-                             value, sizeof(((status_t*)0)->target_brightness), 50);
-    if (retval < 0) {
-        printk(KERN_ERR "%s - failed to submit control msg, error %d\n", __func__, retval);
-        kfree(value);
-        return retval;
-    }
-
-    if (retval != sizeof(((status_t*)0)->target_brightness)){
-        printk(KERN_ERR "%s - device returned %d bytes but we expected %lu\n", __func__, retval, sizeof(((status_t*)0)->target_brightness));
-        kfree(value);
-        return -EINVAL;
-    }
-
-    enum led_brightness brightness = (enum led_brightness)*value;
-    kfree(value);
-
-    return brightness;
-}
 
 struct led_classdev led_cdev_template = {
     .name           = LED_NAME,
