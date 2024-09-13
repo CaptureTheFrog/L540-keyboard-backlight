@@ -13,7 +13,7 @@ ssize_t lid_show(struct device *dev, struct device_attribute *attr, char *buf) {
     struct lid_show_callback_data data;
     data.priv_data = priv_data;
     data.buf = buf;
-    data.len = scnprintf(data.buf + data.len, PAGE_SIZE - data.len, priv_data->active_lid == NULL ? "[none]" : "none");
+    data.len = scnprintf(data.buf, PAGE_SIZE, priv_data->active_lid == NULL ? "[none]" : "none");
 
     acpi_status lid_callback(acpi_handle handle, u32 lvl, void *context, void **rv) {
         struct acpi_device* device = acpi_fetch_acpi_dev(handle);
