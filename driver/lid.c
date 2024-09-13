@@ -65,3 +65,36 @@ ssize_t lid_store(struct device *dev, struct device_attribute *attr, const char 
 
     return count;
 }
+
+struct get_only_lid_callback_data {
+    ssize_t count;
+    struct acpi_device* dev;
+};
+
+/**
+ * get_only_lid() - Gets the lid ACPI device of the machine if there is only one.
+ *
+ * Return: struct acpi_device* for the lid, or NULL if there is not exactly one lid.
+ */
+struct acpi_device* get_only_lid(void){
+    struct get_only_lid_callback_data data;
+    data.count = 0;
+    data.dev = NULL;
+
+    acpi_status lid_callback(acpi_handle handle, u32 lvl, void *context, void **rv) {
+        struct acpi_device* device = acpi_fetch_acpi_dev(handle);
+        struct get_only_lid_callback_data* data = (struct get_only_lid_callback_data*)context;
+        data->dev = device;
+        data->count++;
+        return AE_OK;
+    }
+
+    // Walk ACPI namespace to find LID devices
+    acpi_get_devices("PNP0C0D", lid_callback, &data, NULL);
+
+    if(data.count != 1){
+        return NULL;
+    }
+
+    return data.dev;
+}

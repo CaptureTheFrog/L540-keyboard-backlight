@@ -21,5 +21,6 @@ struct lid_store_callback_data {
 
 ssize_t lid_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
 ssize_t lid_show(struct device *dev, struct device_attribute *attr, char *buf);
+struct acpi_device* get_only_lid(void);
 
 #endif //DRIVER_LID_H

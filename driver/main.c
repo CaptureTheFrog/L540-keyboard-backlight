@@ -277,7 +277,7 @@ static int your_module_probe(struct usb_interface *interface,
     memcpy(&priv_data->led_cdev, &led_cdev_template, sizeof(struct led_classdev));
 
     priv_data->led_cdev.brightness = LED_OFF;  // Initial brightness
-    priv_data->active_lid = NULL;
+    priv_data->active_lid = get_only_lid();
 
     ret = led_classdev_register(&interface->dev, &priv_data->led_cdev);
     if (ret) {
