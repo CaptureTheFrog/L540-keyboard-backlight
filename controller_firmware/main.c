@@ -16,8 +16,11 @@
 
 #define LED_PIN PB1
 
-volatile uint32_t usecs_counter = 0;
-volatile uint16_t time_per_cycle_us = 0;  // Approximate time per PWM cycle in ms
+#define PRESCALE_DIV    (1 << ((TCCR1 & (1<<CS13 | 1<<CS12 | 1<<CS11 | 1<<CS10)) - 1))
+#define PLL_PCK         (64000000 >> ((PLLCSR >> LSM) & 1))
+
+volatile uint32_t usecs_interrupts_counter = 0;
+volatile double time_per_cycle_us = 0.0;  // Approximate time per PWM cycle in us
 
 internal_status_t status_buffer[2];
 unsigned char current_status_buffer_index = 0;
@@ -35,6 +38,16 @@ uint16_t req_to_recvdata = KBD_BL_REQUEST_INVALID;
 uint16_t bytes_remaining = 0;
 uint16_t offset = 0;
 
+double usecs() {
+    return usecs_interrupts_counter * time_per_cycle_us;
+}
+
+void reset_usecs() {
+    cli();
+    usecs_interrupts_counter = 0;
+    sei();
+}
+
 void setupPWM() {
     // Set up Timer 1 for PWM on PB1
     PLLCSR |= (1 << PLLE);  // Enable PLL
@@ -47,16 +60,13 @@ void setupPWM() {
     OCR1C = 0xFF;  // max frequency
 
     // Calculate time per PWM cycle (in us)
-    time_per_cycle_us = (OCR1C + 1) * 8L / (F_CPU / 1000000L);  // Result in us
-
-    // todo: why is the above 1/4 of the correct val?
-    time_per_cycle_us *= 4;
+    time_per_cycle_us = ((uint32_t)(OCR1C + 1) * PRESCALE_DIV * 1000000L) / PLL_PCK;  // Result in us
 
     TIMSK |= (1 << TOIE1);  // Enable Timer 1 overflow interrupt
 }
 
 ISR(TIMER1_OVF_vect) {
-    usecs_counter += time_per_cycle_us;
+    usecs_interrupts_counter++;
 }
 
 uint32_t usecs() {
@@ -228,7 +238,7 @@ int main(void) {
                 wdt_enable(WDTO_1S);
 
                 loops_without_sof = 0; // reset sof counter - a wakeup counts as activity
-                TCCR1 |= (1 << COM1A1);  // re-enable pwm
+                setupPWM(); // reenable pwm
             }
         }
     }
